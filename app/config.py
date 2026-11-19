@@ -15,3 +15,4 @@ APIFY_ACTOR = os.environ.get("APIFY_ACTOR", "")                    # ex. utilisa
 APIFY_INPUT_JSON = os.environ.get("APIFY_INPUT_JSON", "")          # contient {url}
 APIFY_MAX_USD = os.environ.get("APIFY_MAX_USD", "1.0")
 APIFY_TIMEOUT_S = int(os.environ.get("APIFY_TIMEOUT_S", "600"))
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")             # base = léger ; small = plus précis, plus lent

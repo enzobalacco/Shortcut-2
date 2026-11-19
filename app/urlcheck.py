@@ -37,3 +37,7 @@ def extraire_id_youtube(url: str) -> str:
 def url_canonique(video_id: str) -> str:
     """L'URL envoyée à l'importeur est toujours reconstruite, jamais copiée de l'utilisateur."""
     return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def id_valide(identifiant: str) -> bool:
+    return bool(_ID.match(identifiant or ""))

@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from . import config, jobs, auth, importer
-from .urlcheck import extraire_id_youtube, LienInvalide
+import secrets, shutil
+from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
+from . import config, jobs, auth, importer, pipeline, media
+from .urlcheck import extraire_id_youtube, LienInvalide, id_valide
 
 app = FastAPI(title="ShortCuT")
 
@@ -53,17 +54,87 @@ async def lancer_import(request: Request):
     return {"video_id": vid, "nouveau": nouveau, "etat": job["etat"]}
 
 
-@app.get("/api/jobs/{video_id}")
-def etat(video_id: str, request: Request):
-    _connecte(request)
-    try:
-        extraire_id_youtube(f"https://youtu.be/{video_id}")
-    except LienInvalide:
+def _job(video_id: str) -> dict:
+    if not id_valide(video_id):
         raise HTTPException(400, "Identifiant invalide.")
     job = jobs.lire(video_id)
     if not job:
         raise HTTPException(404, "Aucune tâche pour cette vidéo.")
     return job
+
+
+@app.get("/api/jobs/{video_id}")
+def etat(video_id: str, request: Request):
+    _connecte(request)
+    return _job(video_id)
+
+
+@app.post("/api/upload")
+async def deposer(request: Request, fichier: UploadFile = File(...)):
+    _connecte(request)
+    vid = "u" + secrets.token_urlsafe(7)
+    dossier = importer.dossier_source(vid)
+    dest = dossier / "source.mp4"
+    taille = 0
+    with open(dest, "wb") as f:
+        while chunk := await fichier.read(1 << 20):
+            taille += len(chunk)
+            if taille > config.MAX_BYTES:
+                f.close(); shutil.rmtree(dossier, ignore_errors=True)
+                return JSONResponse({"erreur": f"Fichier trop volumineux (maximum {config.MAX_BYTES // 1048576} Mo)."}, status_code=413)
+            f.write(chunk)
+    try:
+        info = importer._verifier(dest)
+    except Exception as e:
+        shutil.rmtree(dossier, ignore_errors=True)
+        return JSONResponse({"erreur": str(e)}, status_code=400)
+    jobs.ecrire(vid, etat="termine", fichier=str(dest), info=info, origine="depot")
+    jobs.ajouter_tentative(vid, "depot", True, f"{info['duree']:.1f} s, {info['largeur']}x{info['hauteur']}")
+    return {"video_id": vid}
+
+
+@app.post("/api/jobs/{video_id}/transcrire")
+def transcrire(video_id: str, request: Request):
+    _connecte(request)
+    if _job(video_id)["etat"] != "termine":
+        raise HTTPException(409, "La vidéo n'est pas encore récupérée.")
+    return {"nouveau": jobs.lancer_etape(video_id, "transcription", lambda: pipeline.transcrire(video_id))}
+
+
+@app.get("/api/jobs/{video_id}/propositions")
+def propositions(video_id: str, request: Request):
+    _connecte(request)
+    job = _job(video_id)
+    try:
+        segs = pipeline.lire_transcript(video_id)
+    except FileNotFoundError:
+        raise HTTPException(409, "Transcris d'abord la vidéo.")
+    return {"propositions": pipeline.proposer(segs, job["info"]["duree"]), "transcript": segs}
+
+
+@app.post("/api/jobs/{video_id}/exporter")
+async def exporter(video_id: str, request: Request):
+    _connecte(request)
+    _job(video_id)
+    try:
+        debut = float((await request.json()).get("debut", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Début invalide.")
+    nom = f"clip_{int(max(debut, 0))}"
+    nouveau = jobs.lancer_etape(video_id, nom, lambda: pipeline.exporter(video_id, debut))
+    return {"etape": nom, "nouveau": nouveau, "fichier": nom + ".mp4"}
+
+
+@app.get("/api/jobs/{video_id}/clips/{nom}")
+def telecharger(video_id: str, nom: str, request: Request):
+    _connecte(request)
+    _job(video_id)
+    if not pipeline.CLIP_RE.match(nom):
+        raise HTTPException(400, "Nom de clip invalide.")
+    p = pipeline.dossier(video_id) / nom
+    if not p.is_file():
+        raise HTTPException(404, "Clip introuvable.")
+    return FileResponse(p, media_type="video/mp4", filename=f"shortcut_{video_id}_{nom}")
 
 
 LOGIN = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -73,19 +144,41 @@ LOGIN = """<!doctype html><meta charset=utf-8><meta name=viewport content="width
 <button style="margin-top:10px;padding:10px 16px;font-size:16px">Entrer</button></form></body>"""
 
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>ShortCuT</title><body style="font-family:system-ui;max-width:640px;margin:8vh auto;padding:0 16px">
-<h1>ShortCuT</h1><p>Colle un lien YouTube :</p>
-<input id=u placeholder="https://www.youtube.com/watch?v=..." style="width:100%;padding:10px;font-size:16px">
-<button id=b style="margin-top:10px;padding:10px 16px;font-size:16px">Récupérer la vidéo</button>
-<pre id=o style="white-space:pre-wrap;background:#f4f4f4;padding:12px;margin-top:16px"></pre>
+<title>ShortCuT</title><body style="font-family:system-ui;max-width:680px;margin:6vh auto;padding:0 16px">
+<h1>ShortCuT</h1>
+<h3>1. Ta vidéo</h3>
+<p><b>Déposer un fichier</b> (méthode fiable) :<br><input type=file id=f accept="video/*"> <button id=bf>Envoyer</button></p>
+<p><b>Ou coller un lien YouTube</b> (souvent bloqué par YouTube depuis un serveur) :<br>
+<input id=u placeholder="https://www.youtube.com/watch?v=..." style="width:100%;padding:8px;font-size:16px"><button id=bu style="margin-top:6px">Récupérer par lien</button></p>
+<pre id=o style="white-space:pre-wrap;background:#f4f4f4;padding:12px"></pre>
+<div id=suite></div>
 <script>
-const o=document.getElementById('o'),b=document.getElementById('b');
-b.onclick=async()=>{b.disabled=true;o.textContent='Envoi...';
- try{const r=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:document.getElementById('u').value})});
- const d=await r.json();if(!r.ok){o.textContent=d.erreur||d.detail||'Erreur';b.disabled=false;return}
- o.textContent=d.nouveau?'Import lancé...':'Un import existe déjà pour cette vidéo : réutilisé, rien n\\'est relancé.';
- const t=setInterval(async()=>{const j=await (await fetch('/api/jobs/'+d.video_id)).json();
-  o.textContent='État : '+j.etat+(j.erreur?'\\nErreur : '+j.erreur:'')+(j.info?'\\nFichier OK : '+j.info.duree.toFixed(1)+' s, '+j.info.largeur+'x'+j.info.hauteur+' (vidéo + audio vérifiés)':'')+'\\n\\nTentatives :\\n'+(j.tentatives||[]).map(t=>'- '+t.methode+' : '+(t.ok?'OK ':'ÉCHEC ')+t.detail).join('\\n');
-  if(j.etat!='en_cours'){clearInterval(t);b.disabled=false}},3000)}
- catch(e){o.textContent='Erreur réseau';b.disabled=false}};
+const $=id=>document.getElementById(id),o=$('o'),suite=$('suite');let vid=null;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function api(u,opt){const r=await fetch(u,opt);let d={};try{d=await r.json()}catch(e){}
+ if(!r.ok)throw new Error(d.erreur||d.detail||('Erreur '+r.status));return d}
+function post(u,b){return api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})})}
+async function suivre(id){for(;;){const j=await api('/api/jobs/'+id);
+ o.textContent='État : '+j.etat+(j.erreur?'\nErreur : '+j.erreur:'')+(j.info?'\nFichier OK : '+j.info.duree.toFixed(1)+' s, '+j.info.largeur+'x'+j.info.hauteur+' (vidéo + audio vérifiés)':'')+'\n\nTentatives :\n'+(j.tentatives||[]).map(t=>'- '+t.methode+' : '+(t.ok?'OK ':'ÉCHEC ')+t.detail).join('\n');
+ if(j.etat!='en_cours')return j;await sleep(3000)}}
+async function etape(id,nom){for(;;){const j=await api('/api/jobs/'+id);const e=(j.etapes||{})[nom]||{};
+ if(e.etat=='termine')return;if(e.etat=='echec')throw new Error(e.erreur||'Échec');await sleep(3000)}}
+async function apres(id){vid=id;suite.innerHTML='<h3>2. Transcription</h3><p id=t>Transcription du français en cours (1ère fois : téléchargement du modèle, quelques minutes)...</p>';
+ try{await post('/api/jobs/'+id+'/transcrire');await etape(id,'transcription');
+ const p=await api('/api/jobs/'+id+'/propositions');$('t').textContent='Transcription terminée.';
+ suite.innerHTML+='<h3>3. Extraits proposés (20 s)</h3>'+p.propositions.map(x=>'<p><b>'+x.debut+' s → '+x.fin+' s</b><br>'+x.extrait.replace(/</g,'&lt;')+'<br><button data-d="'+x.debut+'">Exporter ce clip vertical</button></p>').join('')+'<div id=res></div>';
+ suite.querySelectorAll('button[data-d]').forEach(b=>b.onclick=()=>exporter(id,b));}
+ catch(e){$('t').textContent='Erreur : '+e.message}}
+async function exporter(id,b){b.disabled=true;$('res').textContent='Création du clip...';
+ try{const r=await post('/api/jobs/'+id+'/exporter',{debut:parseFloat(b.dataset.d)});await etape(id,r.etape);
+ const u='/api/jobs/'+id+'/clips/'+r.fichier;$('res').innerHTML='<video src="'+u+'" controls playsinline style="max-width:270px"></video><p><a href="'+u+'" download>Télécharger le MP4</a></p>'}
+ catch(e){$('res').textContent='Erreur : '+e.message}b.disabled=false}
+$('bf').onclick=async()=>{const f=$('f').files[0];if(!f){o.textContent='Choisis un fichier.';return}
+ $('bf').disabled=true;o.textContent='Envoi en cours...';
+ try{const fd=new FormData();fd.append('fichier',f);const d=await api('/api/upload',{method:'POST',body:fd});await suivre(d.video_id);await apres(d.video_id)}
+ catch(e){o.textContent='Erreur : '+e.message}$('bf').disabled=false};
+$('bu').onclick=async()=>{$('bu').disabled=true;o.textContent='Envoi...';
+ try{const d=await post('/api/import',{url:$('u').value});o.textContent=d.nouveau?'Import lancé...':'Un import existe déjà : réutilisé, rien n\'est relancé.';
+ const j=await suivre(d.video_id);if(j.etat=='termine')await apres(d.video_id)}
+ catch(e){o.textContent='Erreur : '+e.message}$('bu').disabled=false};
 </script></body>"""

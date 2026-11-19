@@ -5,5 +5,5 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
-ENV DATA_DIR=/data YTDLP_EXTRA_ARGS="--js-runtimes node"
+ENV DATA_DIR=/data HF_HOME=/data/hf YTDLP_EXTRA_ARGS="--js-runtimes node"
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

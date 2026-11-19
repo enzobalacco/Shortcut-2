@@ -51,3 +51,33 @@ def reprise_apres_redemarrage() -> None:
         j = json.loads(p.read_text())
         if j.get("etat") == "en_cours":
             ecrire(j["video_id"], etat="echec", erreur="Tâche interrompue par un redémarrage du serveur. Relance-la (le fichier déjà récupéré sera réutilisé).")
+        for nom, e in (j.get("etapes") or {}).items():
+            if e.get("etat") == "en_cours":
+                maj_etape(j["video_id"], nom, etat="echec", erreur="Interrompu par un redémarrage du serveur. Relance l'étape.")
+
+
+def maj_etape(video_id: str, nom: str, **champs) -> None:
+    with _lock:
+        job = lire(video_id) or {}
+        etapes = job.get("etapes", {})
+        etapes[nom] = {**etapes.get(nom, {}), **champs}
+        job["etapes"] = etapes
+        job["maj"] = time.time()
+        _f(video_id).write_text(json.dumps(job, ensure_ascii=False, indent=1))
+
+
+def lancer_etape(video_id: str, nom: str, travail) -> bool:
+    """Lance une étape (transcription, export...) une seule fois ; un second clic ne relance rien."""
+    job = lire(video_id) or {}
+    if job.get("etapes", {}).get(nom, {}).get("etat") in ("en_cours", "termine"):
+        return False
+    maj_etape(video_id, nom, etat="en_cours", erreur=None)
+
+    def _run():
+        try:
+            travail()
+            maj_etape(video_id, nom, etat="termine")
+        except Exception as e:
+            maj_etape(video_id, nom, etat="echec", erreur=str(e)[:400])
+    threading.Thread(target=_run, daemon=True).start()
+    return True
