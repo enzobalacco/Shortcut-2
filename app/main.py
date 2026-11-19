@@ -1,4 +1,5 @@
 import secrets, shutil
+from pathlib import Path
 from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from . import config, jobs, auth, importer, pipeline, media
@@ -143,42 +144,4 @@ LOGIN = """<!doctype html><meta charset=utf-8><meta name=viewport content="width
 <input type=password name=mot_de_passe placeholder="Mot de passe" autofocus style="width:100%;padding:10px;font-size:16px">
 <button style="margin-top:10px;padding:10px 16px;font-size:16px">Entrer</button></form></body>"""
 
-PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>ShortCuT</title><body style="font-family:system-ui;max-width:680px;margin:6vh auto;padding:0 16px">
-<h1>ShortCuT</h1>
-<h3>1. Ta vidéo</h3>
-<p><b>Déposer un fichier</b> (méthode fiable) :<br><input type=file id=f accept="video/*"> <button id=bf>Envoyer</button></p>
-<p><b>Ou coller un lien YouTube</b> (souvent bloqué par YouTube depuis un serveur) :<br>
-<input id=u placeholder="https://www.youtube.com/watch?v=..." style="width:100%;padding:8px;font-size:16px"><button id=bu style="margin-top:6px">Récupérer par lien</button></p>
-<pre id=o style="white-space:pre-wrap;background:#f4f4f4;padding:12px"></pre>
-<div id=suite></div>
-<script>
-const $=id=>document.getElementById(id),o=$('o'),suite=$('suite');let vid=null;
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-async function api(u,opt){const r=await fetch(u,opt);let d={};try{d=await r.json()}catch(e){}
- if(!r.ok)throw new Error(d.erreur||d.detail||('Erreur '+r.status));return d}
-function post(u,b){return api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})})}
-async function suivre(id){for(;;){const j=await api('/api/jobs/'+id);
- o.textContent='État : '+j.etat+(j.erreur?'\nErreur : '+j.erreur:'')+(j.info?'\nFichier OK : '+j.info.duree.toFixed(1)+' s, '+j.info.largeur+'x'+j.info.hauteur+' (vidéo + audio vérifiés)':'')+'\n\nTentatives :\n'+(j.tentatives||[]).map(t=>'- '+t.methode+' : '+(t.ok?'OK ':'ÉCHEC ')+t.detail).join('\n');
- if(j.etat!='en_cours')return j;await sleep(3000)}}
-async function etape(id,nom){for(;;){const j=await api('/api/jobs/'+id);const e=(j.etapes||{})[nom]||{};
- if(e.etat=='termine')return;if(e.etat=='echec')throw new Error(e.erreur||'Échec');await sleep(3000)}}
-async function apres(id){vid=id;suite.innerHTML='<h3>2. Transcription</h3><p id=t>Transcription du français en cours (1ère fois : téléchargement du modèle, quelques minutes)...</p>';
- try{await post('/api/jobs/'+id+'/transcrire');await etape(id,'transcription');
- const p=await api('/api/jobs/'+id+'/propositions');$('t').textContent='Transcription terminée.';
- suite.innerHTML+='<h3>3. Extraits proposés (20 s)</h3>'+p.propositions.map(x=>'<p><b>'+x.debut+' s → '+x.fin+' s</b><br>'+x.extrait.replace(/</g,'&lt;')+'<br><button data-d="'+x.debut+'">Exporter ce clip vertical</button></p>').join('')+'<div id=res></div>';
- suite.querySelectorAll('button[data-d]').forEach(b=>b.onclick=()=>exporter(id,b));}
- catch(e){$('t').textContent='Erreur : '+e.message}}
-async function exporter(id,b){b.disabled=true;$('res').textContent='Création du clip...';
- try{const r=await post('/api/jobs/'+id+'/exporter',{debut:parseFloat(b.dataset.d)});await etape(id,r.etape);
- const u='/api/jobs/'+id+'/clips/'+r.fichier;$('res').innerHTML='<video src="'+u+'" controls playsinline style="max-width:270px"></video><p><a href="'+u+'" download>Télécharger le MP4</a></p>'}
- catch(e){$('res').textContent='Erreur : '+e.message}b.disabled=false}
-$('bf').onclick=async()=>{const f=$('f').files[0];if(!f){o.textContent='Choisis un fichier.';return}
- $('bf').disabled=true;o.textContent='Envoi en cours...';
- try{const fd=new FormData();fd.append('fichier',f);const d=await api('/api/upload',{method:'POST',body:fd});await suivre(d.video_id);await apres(d.video_id)}
- catch(e){o.textContent='Erreur : '+e.message}$('bf').disabled=false};
-$('bu').onclick=async()=>{$('bu').disabled=true;o.textContent='Envoi...';
- try{const d=await post('/api/import',{url:$('u').value});o.textContent=d.nouveau?'Import lancé...':'Un import existe déjà : réutilisé, rien n\'est relancé.';
- const j=await suivre(d.video_id);if(j.etat=='termine')await apres(d.video_id)}
- catch(e){o.textContent='Erreur : '+e.message}$('bu').disabled=false};
-</script></body>"""
+PAGE = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
